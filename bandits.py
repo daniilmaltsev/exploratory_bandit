@@ -17,7 +17,7 @@ def get_delta(cvr):
     cvr_leader = cvr[leader]
     delta = cvr_leader - cvr
     silver = cvr[cvr < cvr_leader].argmax()
-    delta[leader] = delta[silver]
+    delta[leader] = delta[silver] # FIX ARGMAX!!!
     return delta
 
 def get_info_gain(delta, entropy_gradient):
@@ -55,7 +55,7 @@ def minimize_loss(cvr, n_users, resolution=50000):
     scvrs = sample_conversions(cvr, n_users, resolution)
     
     leader = np.argmax(cvr)
-    silver = cvr[cvr < cvr_leader].argmax()
+    silver = cvr[cvr < cvr_leader].argmax() # FIX ARGMAX!!!
     leader_scvr = scvrs[:,leader]
     silver_scvr = scvrs[:, silver]
     deltas = scvrs - leader_scvr.reshape(resolution, 1)
@@ -101,9 +101,55 @@ def get_loss_gradient(cvr, n_users, batch_size=100, resolution=100000):
         winner_cvr = tweaked_scvrs.max(axis=1).reshape(resolution, 1)
         deltas = winner_cvr - tweaked_scvrs
         loss = deltas[:, leader].mean()
-        loss_gradients[i] = (base_loss - loss) / base_loss
+        loss_gradients[i] = (base_loss - loss) #/ base_loss
         cnt += 1
     loss_gradients = pd.Series(loss_gradients)
     loss_gradients = loss_gradients.clip(0, None)
     norma_loss_gradients = loss_gradients / loss_gradients.sum()
     return np.array(norma_loss_gradients)
+
+def get_quantile_distance(cvr, n_users, n_sigmas=3):
+    stds = np.sqrt(cvr * (1 - cvr) * n_users) / n_users
+    leader = np.argmax(cvr)
+    cvr_leader = cvr[leader]
+
+    uq = cvr + n_sigmas * stds
+    lq = cvr - n_sigmas * stds
+    dq = uq - lq[leader]
+    # Assign the quantile distance between leader and top loss contributor to leader
+    dq[leader] = dq[:leader].append(dq[leader+1:]).max()
+    dq = np.clip(dq, 0, None)
+    return dq
+
+def quantile_intersection_gradient(cvr, n_users, batch_size):
+    igs = []
+    for i in range(len(cvr)):
+        tweaked_users = n_users.copy()
+        tweaked_users[i] += batch_size
+        intersection_gradient = get_quantile_distance(cvr, n_users) - get_quantile_distance(cvr, tweaked_users)
+        igs.append(intersection_gradient[i])
+    igs = np.array(igs)
+    return igs
+
+def single_shot_squid(cvr, n_users, batch_size):
+    igs = quantile_intersection_gradient(cvr, n_users, batch_size)
+    allocation = igs / igs.sum()
+    return allocation
+
+def squid(cvr, n_users, batch_size):
+    steps = np.arange(batch_size, step=batch_size//10)
+    igs = []
+    # TODO: vectorize
+    for i in steps:
+        ig = quantile_intersection_gradient(df['cvr'], df['n_users'], i)
+        igs.append(ig)
+    igdf = pd.DataFrame(igs)
+    mm = igdf.to_numpy()
+    gm = np.gradient(mm, axis=0)
+    n_steps = len(gm)
+    entropy_reducing_injections = pd.DataFrame(gm).melt().sort_values(by='value', ascending=False).head(n_steps)['variable'].value_counts()
+    allocation = np.zeros(len(n_users))
+    for i in entropy_reducing_injections.index:
+        allocation[i] = entropy_reducing_injections[i]
+    allocation /= allocation.sum()
+    return allocation
